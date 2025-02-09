@@ -5,6 +5,7 @@
 .venv
 venv/
 .env
+deadbot.py
 
 # User-specific files
 *.rsuser

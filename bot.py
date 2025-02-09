@@ -1,16 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-# updated jarvisbot code
+from keys import *
 
-import os, discord, asyncio, json, sys
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
 from langchain.chains.retrieval import create_retrieval_chain
 
@@ -24,59 +21,27 @@ from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools.retriever import create_retriever_tool
 
 
-GENAI_TOKEN_ID = os.getenv('GENAI_TOKEN')
-DISCORD_TOKEN_ID = os.getenv('DISCORD_BOT_TOKEN')
-ALLOWED_CHANNEL_ID = int(os.getenv('CHANNEL_TOKEN'))
-PINECONE_TOKEN_ID = os.getenv('PINECONE_TOKEN')
-LANGSMITH_TOKEN_ID = os.getenv('LANGSMITH_API_KEY')
-TAVILY_TOKEN_ID = os.getenv('TAVILY_API_KEY')
-
-print(f"TAVILY_TOKEN: {TAVILY_TOKEN_ID}")
-
-if not os.getenv("GOOGLE_API_KEY"):
-    os.environ["GOOGLE_API_KEY"] = GENAI_TOKEN_ID
-
-if not os.getenv("PINECONE_API_KEY"):
-    os.environ["PINECONE_API_KEY"] = PINECONE_TOKEN_ID
-
-if not os.getenv("LANGSMITH_API_KEY"):
-    os.environ["LANGSMITH_API_KEY"] = LANGSMITH_TOKEN_ID
-
-if not os.getenv("TAVILY_API_KEY"):
-    os.environ["TAVILY_API_KEY"] = LANGSMITH_TOKEN_ID
-
-pinecone_api_key = os.environ.get("PINECONE_API_KEY")
-pinecone_index_name = "lotus"
-
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
-embeddings = GoogleGenerativeAIEmbeddings(google_api_key=GENAI_TOKEN_ID, model="models/embedding-001", )
-
-pc = Pinecone(api_key=pinecone_api_key)
-index = pc.Index("lotus")
-vector_store = PineconeVectorStore(embedding=embeddings, index=index)
-
-llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        temperature=0.4,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2
-    )
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
 
 
 
+### Discord Deployment : Lotus ###
 @client.event
-async def on_ready():  # Initial deployment
+async def on_ready():  # Initial deployment on discord.
     print(f'{client.user} has connected to Discord!')
     channel = client.get_channel(ALLOWED_CHANNEL_ID)
 
-    await channel.send("This is Lotus")
+    await channel.send("Lotus is ready to assist.")
+
+def get_retriever(): # Simple function to universally search at kwargs hardcoded value
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    return retriever
 
 def get_documents_from_web(url): # This is our reader function
     # scrape data from webpage and import the data into the chain document
+    print(f"Read webpage: {url}")
 
     loader = WebBaseLoader(url)
     print(f"Loaded new webpage: {url}")
@@ -90,10 +55,9 @@ def get_documents_from_web(url): # This is our reader function
     splitDocs = splitter.split_documents(docs)
     return splitDocs
 
-def create_db(docs): 
-    # This is our writer function into the vector database
-    # This function should only be called if we need to write to the database
-    # Make a separate function that queries the current database
+
+### create_db and query_db functions ###
+def create_db(docs): # Appends sliced url content to the database
     embedding = GoogleGenerativeAIEmbeddings(google_api_key=GENAI_TOKEN_ID, model="models/embedding-001", )
     vectorStore = PineconeVectorStore.from_documents(
         docs,
@@ -102,88 +66,155 @@ def create_db(docs):
         )
     return vectorStore
 
-def query_db(docs, top_k=2): # This is our query function
+def query_db(docs, top_k=2): # Queries the database without appending new data from url
     if isinstance(docs, list):
-        # Assuming docs is a list of document objects, extract the text content
         docs = " ".join([doc.page_content for doc in docs])
-    results = vector_store.similarity_search(docs, k=top_k, filter={"source": {"$exists": True}}) # passes the link, 
+    results = vector_store.similarity_search(docs, k=top_k, filter={"source": {"$exists": True}}) # If the link is similar to the query
     
     for res in results:
         print(f"* ({res.metadata["source"]})")
 
     return results
 
-def create_chain(vectorStore):
-    model = llm
+### END create_db and query_db functions ###
+
+### Start chaining functions ###
+def create_prompt_chain(user_input):
+    system_prompt = (
+        """You are a helpful assistant. Answer the user's questions based on the context: {context}"""
+    )
+
+    retriever = get_retriever()
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "Answer the user's questions based on the context: {context}"),
+        ("system", system_prompt),
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}")
     ])
 
-    # chain = prompt | llm
-    chain = create_stuff_documents_chain(
-        llm=model, 
-        prompt=prompt
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    response = rag_chain.invoke({"input": user_input})
+
+    return response["output"]
+
+
+### Contextualize question ###
+def contextualize_question():
+
+    retriever = get_retriever()
+
+    contextualize_q_system_prompt = (
+    "Given a chat history and the latest user question "
+    "which might reference context in the chat history, "
+    "formulate a standalone question which can be understood "
+    "without the chat history. Do NOT answer the question, "
+    "just reformulate it if needed and otherwise return it as is."
     )
-
-    retriever = vectorStore.as_retriever(search_kwargs={"k": 3})
-
-    retriever_prompt = ChatPromptTemplate.from_messages([
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("user", "{input}"),
-        ("user", "Given the above conversation, generate a search query to look up in order to get information relevant to the conversation.")
-    ])
-
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
     history_aware_retriever = create_history_aware_retriever(
-        llm=model,
-        retriever=retriever,
-        prompt=retriever_prompt
+        llm, retriever, contextualize_q_prompt
     )
 
-    retrieval_chain = create_retrieval_chain(
-        # retriever
-        history_aware_retriever,
-        chain
+    return history_aware_retriever
+
+### Answer question ###
+def answer_question():
+
+    history_aware_retriever = contextualize_question()
+
+    system_prompt = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer "
+        "the question. If you don't know the answer, say that you "
+        "don't know. Use three sentences maximum and keep the "
+        "answer concise."
+        "\n\n"
+        "{context}"
+    )
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+    return rag_chain
+
+chat_history = {}
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    if session_id not in chat_history:
+        chat_history[session_id] = ChatMessageHistory()
+    return chat_history[session_id]  
+
+def chain():
+    rag_chain = answer_question()
+
+    conversational_rag_chain = RunnableWithMessageHistory(
+        rag_chain,
+        get_session_history,
+        input_messages_key="input",
+        history_messages_key="chat_history",
+        output_messages_key="answer",
     )
 
-    return retrieval_chain
+    return conversational_rag_chain
 
-def process_chat(chain, question, chat_history):
-    response = chain.invoke({
+### Overloaded process_chat functions ###
+def process_chat(user_input, chat_history): # Currently process chat without agents
+    conversational_rag_chain = chain()
+
+    response = conversational_rag_chain.invoke({
+        "input": user_input,
+        "chat_history": chat_history
+        },
+        config={
+            "configurable": {"session_id": "ns1"}
+        },
+    )["answer"]
+
+    return response
+
+### THIS IS IF IT LOADS WITH AGENT ###
+def process_chat_with_agent(agentExecutor, user_input, chat_history):
+    response = agentExecutor.invoke({
         "chat_history": chat_history,
-        "input": question
+        "input": user_input
     })
-    return response["answer"]
+    return response["output"]
 
+# This iteration currently does not run with agents. # It is a work in progress.
 def search_web_agent():
+    global agentExecutor
 
     search = TavilySearchResults(max_results=2)
-    # search_results = search.invoke("What is the weather in Detroit, Michigan?")
-    # print(search_results)
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
-    retriever_tools = create_retriever_tool()
+    retriever_tools = create_retriever_tool(
+        retriever,
+        "lcel_search",
+        "Use this tool when searching for information about Pinecone Queries."
+    )
     prompt = hub.pull("hwchase17/react") # temp prompt
-    tools = [search, retriever_tools]
+    tools = [ search, retriever_tools ]
     agent = create_react_agent(llm, tools, prompt)
 
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-    agent_executor.invoke({"input": "How do I reduce my token usage when making LLMs?"})
+    agentExecutor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
+# END 
 
-if __name__ == '__main__':
-
-    url = "https://docs.pinecone.io/guides/data/query-data#query-by-record-id"
-
-    chain = None
-    chat_history = []
-
-    # query first, check if any top k results include link to database
-    # if so, ignore creating a new db
-    # if not, scrape the webpage and add to database
-
-    search_web_agent()
+def vector_store_url(url):
 
     docs = get_documents_from_web(url)
     results = query_db(docs)
@@ -198,7 +229,17 @@ if __name__ == '__main__':
         vectorStore = PineconeVectorStore(embedding=embeddings, index=index)
         print(f"Using existing vector store {url}")
 
-    chain = create_chain(vectorStore)
+    return vectorStore
+
+
+### Driver ###
+if __name__ == '__main__':
+
+    global agentExecutor
+
+    # Default url #
+    url = "https://docs.pinecone.io/guides/data/query-data#query-by-record-id"
+    vector_store_url(url)
 
     @client.event
     async def on_message(message):
@@ -212,21 +253,29 @@ if __name__ == '__main__':
                 command = message.content.strip()
 
                 if command.lower() == 'exit':
-                    await message.channel.send("EXIT")
-                    return
+                    await message.channel.send("Exiting...")
+                    sys.exit(0)
                 
-                response = process_chat(chain, command, chat_history)
-                chat_history.append(HumanMessage(content=command))
-                chat_history.append(AIMessage(content=response))
+                session_id = str(message.author.id)
+                response = process_chat(command, session_id)
+                session_history = get_session_history(session_id)
+                session_history.add_message(HumanMessage(content=command))
+                session_history.add_ai_message(AIMessage(content=response))
                 print("Assistant: ", response)
                 await message.channel.send(response)
 
 client.run(DISCORD_TOKEN_ID)
 
+# AI modelling
+# 
+# AI agent: Functions can include adjusting personality, tonality, etc.
+# Turning it into a full fledged chatbot 
 
+# tools = [ search, retriever, adjust_sentiment, adjust_personality, adjust_tonality, play_games, etc. ]
 
-# issue i notice now is that chat history can be overloaded if conversation extends.
-# need to figure out a way to limit the chat history
-
-
-        
+# search: simply searches the web
+# retriever: retrieves existing data from the vector database based on the query.
+# adjust_sentiment: adjusts the sentiment of the response based on sentiment algorithm and labelling.
+# adjust_personality: adjusts the personality of the response based on personality algorithm.
+# adjust_tonality: adjusts the tonality of the response based on tonality algorithm.
+# play_games: plays games with the user.
