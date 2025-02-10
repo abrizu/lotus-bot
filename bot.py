@@ -210,14 +210,12 @@ def search_web_agent():
 
     search = TavilySearchResults(max_results=2)
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-    stock_market = stock_market_api()
 
     retriever_tools = create_retriever_tool({
         retriever,
         "Pinecone Retriever",
         "Use this tool when searching for information about Pinecone Queries."
-    }
-    
+        }
     )
     prompt = hub.pull("hwchase17/react") # temp prompt
     tools = [ search, retriever_tools ]
