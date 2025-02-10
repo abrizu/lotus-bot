@@ -44,7 +44,7 @@ pinecone_api_key = os.environ.get("PINECONE_API_KEY")
 pinecone_index_name = "lotus"
 
 # Create Retriever
-loader = WebBaseLoader("https://python.langchain.com/docs/expression_language/")
+loader = WebBaseLoader("https://docs.pinecone.io/guides/data/query-data#query-by-record-id")
 docs = loader.load()
     
 splitter = RecursiveCharacterTextSplitter(
@@ -72,14 +72,14 @@ model = ChatGoogleGenerativeAI(
         max_retries=2
     )
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a friendly assistant called Max."),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad")
-])
+# prompt = ChatPromptTemplate.from_messages([
+#     ("system", "You are a friendly assistant called Max."),
+#     MessagesPlaceholder(variable_name="chat_history"),
+#     ("human", "{input}"),
+#     MessagesPlaceholder(variable_name="agent_scratchpad")
+# ])
 
-# prompt = hub.pull("hwchase17/react")
+prompt = hub.pull("hwchase17/react")
 
 search = TavilySearchResults(max_results=2)
 retriever_tools = create_retriever_tool(

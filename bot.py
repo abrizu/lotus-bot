@@ -49,8 +49,8 @@ def get_documents_from_web(url): # This is our reader function
     print("reading...")
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=400,
-        chunk_overlap=20
+        chunk_size=1000,
+        chunk_overlap=200
     )
     splitDocs = splitter.split_documents(docs)
     return splitDocs
@@ -66,7 +66,8 @@ def create_db(docs): # Appends sliced url content to the database
         )
     return vectorStore
 
-def query_db(docs, top_k=2): # Queries the database without appending new data from url
+
+def query_db_url(docs, top_k=2): # Queries the database without appending new data from url
     if isinstance(docs, list):
         docs = " ".join([doc.page_content for doc in docs])
     results = vector_store.similarity_search(docs, k=top_k, filter={"source": {"$exists": True}}) # If the link is similar to the query
@@ -75,6 +76,23 @@ def query_db(docs, top_k=2): # Queries the database without appending new data f
         print(f"* ({res.metadata["source"]})")
 
     return results
+
+def vector_store_url(url): # This function checks if the current url is in the vector database. Appends if so, otherwise ignores it.
+
+    docs = get_documents_from_web(url)
+    results = query_db_url(docs)
+
+    url_in_results = any(res.metadata["source"] == url for res in results)
+
+    if not url_in_results: # if the url is not in results, add url content to the db
+        vectorStore = create_db(docs)
+        print(f"Created new vector store {url}")
+    else:
+        # uses the existing vector store db
+        vectorStore = PineconeVectorStore(embedding=embeddings, index=index)
+        print(f"Using existing vector store {url}")
+
+    return vectorStore
 
 ### END create_db and query_db functions ###
 
@@ -186,25 +204,20 @@ def process_chat(user_input, chat_history): # Currently process chat without age
 
     return response
 
-### THIS IS IF IT LOADS WITH AGENT ###
-def process_chat_with_agent(agentExecutor, user_input, chat_history):
-    response = agentExecutor.invoke({
-        "chat_history": chat_history,
-        "input": user_input
-    })
-    return response["output"]
-
 # This iteration currently does not run with agents. # It is a work in progress.
 def search_web_agent():
     global agentExecutor
 
     search = TavilySearchResults(max_results=2)
     retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    stock_market = stock_market_api()
 
-    retriever_tools = create_retriever_tool(
+    retriever_tools = create_retriever_tool({
         retriever,
-        "lcel_search",
+        "Pinecone Retriever",
         "Use this tool when searching for information about Pinecone Queries."
+    }
+    
     )
     prompt = hub.pull("hwchase17/react") # temp prompt
     tools = [ search, retriever_tools ]
@@ -212,25 +225,22 @@ def search_web_agent():
 
     agentExecutor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
+    return agentExecutor
+
+### THIS IS IF IT LOADS WITH AGENT ###
+def process_chat_with_agent(agentExecutor, user_input, chat_history):
+    response = agentExecutor.invoke({
+        "chat_history": chat_history,
+        "input": user_input
+    },
+        config={
+            "configurable": {"session_id": "agent-01"}
+        },
+    )["output"]
+
+    return response
+
 # END 
-
-def vector_store_url(url):
-
-    docs = get_documents_from_web(url)
-    results = query_db(docs)
-
-    url_in_results = any(res.metadata["source"] == url for res in results)
-
-    if not url_in_results: # if the url is not in results, add url content to the db
-        vectorStore = create_db(docs)
-        print(f"Created new vector store {url}")
-    else:
-        # uses the existing vector store db
-        vectorStore = PineconeVectorStore(embedding=embeddings, index=index)
-        print(f"Using existing vector store {url}")
-
-    return vectorStore
-
 
 ### Driver ###
 if __name__ == '__main__':
@@ -240,6 +250,8 @@ if __name__ == '__main__':
     # Default url #
     url = "https://docs.pinecone.io/guides/data/query-data#query-by-record-id"
     vector_store_url(url)
+
+    agentExecutor = search_web_agent()
 
     @client.event
     async def on_message(message):
@@ -258,11 +270,15 @@ if __name__ == '__main__':
                 
                 session_id = str(message.author.id)
                 response = process_chat(command, session_id)
+                agent_response = process_chat_with_agent(agentExecutor, command, chat_history)
+
+                current_ai = agent_response # toggle response use
+
                 session_history = get_session_history(session_id)
                 session_history.add_message(HumanMessage(content=command))
-                session_history.add_ai_message(AIMessage(content=response))
-                print("Assistant: ", response)
-                await message.channel.send(response)
+                session_history.add_ai_message(AIMessage(content=current_ai))
+                print("Assistant: ", current_ai)
+                await message.channel.send(current_ai)
 
 client.run(DISCORD_TOKEN_ID)
 
@@ -279,3 +295,9 @@ client.run(DISCORD_TOKEN_ID)
 # adjust_personality: adjusts the personality of the response based on personality algorithm.
 # adjust_tonality: adjusts the tonality of the response based on tonality algorithm.
 # play_games: plays games with the user.
+
+# CRITICAL ISSUES
+# Need advanced chunking methods: Chunk size is dynamic depending on the content, and can overload
+# the model if the chunk size is too large.
+
+# Use semantic chunking to chunk the data into smaller pieces based on semantic meaning.
